@@ -1,7 +1,9 @@
 use std::{
+    borrow::Borrow,
     io::{self, ErrorKind, Read, Write},
     os::fd::AsRawFd,
     process,
+    sync::Mutex,
 };
 
 use termios::*;
@@ -9,7 +11,11 @@ use termios::*;
 mod error;
 pub mod prelude;
 
-static mut ORIGINAL_TERMINAL: Option<Termios> = None;
+static ORIGINAL_TERMINAL: Mutex<Option<Termios>> = Mutex::new(None);
+
+// lazy_static! {
+//     static ref my_mutex: Mutex<i32> = Mutex::new(0i32);
+// }
 
 fn enable_raw_mode() {
     let original_termios = Termios::from_fd(io::stdin().as_raw_fd()).unwrap();
@@ -26,23 +32,21 @@ fn enable_raw_mode() {
     // Apply the updated termios settings
     tcsetattr(io::stdin().as_raw_fd(), TCSANOW, &termios).unwrap();
 
-    unsafe {
-        ORIGINAL_TERMINAL = Some(original_termios);
-    }
+    *(ORIGINAL_TERMINAL.lock().unwrap()) = Some(original_termios);
 }
 
-fn disable_terminal(original_terminal: &Termios) {
-    tcsetattr(io::stdin().as_raw_fd(), TCSANOW, original_terminal).unwrap();
+fn disable_terminal(original_termios: &Termios) {
+    tcsetattr(io::stdin().as_raw_fd(), TCSANOW, original_termios).unwrap();
 }
 
 fn cleanup() {
     write_to_stdout("\x1b[2J");
     write_to_stdout("\x1b[H");
 
-    unsafe {
-        if let Some(original_termios) = &mut ORIGINAL_TERMINAL {
-            disable_terminal(original_termios);
-        }
+    flush_stdout();
+
+    if let Some(original_termios) = ORIGINAL_TERMINAL.lock().unwrap().as_ref() {
+        disable_terminal(original_termios);
     }
 }
 
@@ -62,10 +66,20 @@ fn write_to_stdout(s: &str) {
     if let Err(error) = write_ok {
         die(&format!("Write error: {}", error));
     }
+}
 
+fn flush_stdout() {
+    let mut stdout = io::stdout().lock();
     let flush_ok = stdout.flush();
     if let Err(error) = flush_ok {
         die(&format!("Flush error: {}", error));
+    }
+}
+
+/** Requires a flush to be guaranteed on the screen */
+fn editor_draw_rows() {
+    for y in 0..24 {
+        write_to_stdout("~\r\n");
     }
 }
 
@@ -75,6 +89,12 @@ fn editor_refresh_screen() {
 
     // Position at the top of the screen
     write_to_stdout("\x1b[H");
+
+    editor_draw_rows();
+
+    write_to_stdout("\x1b[H");
+
+    flush_stdout();
 }
 
 fn editor_read_key() -> u8 {
