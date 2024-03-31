@@ -1,6 +1,6 @@
 use std::{
     io::{self, Read},
-    os::fd::{AsFd, AsRawFd},
+    os::fd::AsRawFd,
 };
 
 use termios::*;
@@ -15,7 +15,7 @@ struct Cleanup {
 impl Cleanup {
     pub fn default() -> Cleanup {
         Cleanup {
-            original_termios: None
+            original_termios: None,
         }
     }
 
@@ -51,7 +51,14 @@ fn main() {
             break;
         }
 
-        println!("Recv: {:?}", &buf)
+        let input = buf[0] as i32;
+        let is_control_char: bool = unsafe { libc::iscntrl(input) == 1 };
+
+        if is_control_char {
+            print!("{}\r\n", input);
+        } else {
+            print!("{} ('{}')\r\n", input, buf[0] as char);
+        }
     }
 }
 
@@ -61,7 +68,10 @@ fn enable_raw_mode(cleanup: &mut Cleanup) {
     let mut termios = original_termios;
 
     // Turn off ECHO
-    termios.c_lflag &= !(ECHO | ICANON);
+    termios.c_iflag &= !(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    termios.c_oflag &= !(OPOST);
+    termios.c_cflag |= CS8;
+    termios.c_lflag &= !(ECHO | ICANON | IEXTEN | ISIG);
 
     // Apply the updated termios settings
     tcsetattr(io::stdin().as_raw_fd(), TCSANOW, &termios).unwrap();
