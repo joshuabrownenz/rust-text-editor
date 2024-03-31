@@ -9,32 +9,9 @@ use termios::*;
 mod error;
 pub mod prelude;
 
-struct Cleanup {
-    original_termios: Option<Termios>,
-}
+static mut ORIGINAL_TERMINAL: Option<Termios> = None;
 
-impl Cleanup {
-    pub fn default() -> Cleanup {
-        Cleanup {
-            original_termios: None,
-        }
-    }
-
-    pub fn set_original_termios(&mut self, original_terminal: Termios) {
-        self.original_termios = Some(original_terminal);
-    }
-}
-
-impl Drop for Cleanup {
-    fn drop(&mut self) {
-        println!("Running cleanup");
-        if let Some(original_termios) = &self.original_termios {
-            disable_terminal(original_termios);
-        }
-    }
-}
-
-fn enable_raw_mode(cleanup: &mut Cleanup) {
+fn enable_raw_mode() {
     let original_termios = Termios::from_fd(io::stdin().as_raw_fd()).unwrap();
 
     let mut termios = original_termios;
@@ -49,14 +26,28 @@ fn enable_raw_mode(cleanup: &mut Cleanup) {
     // Apply the updated termios settings
     tcsetattr(io::stdin().as_raw_fd(), TCSANOW, &termios).unwrap();
 
-    cleanup.set_original_termios(original_termios);
+    unsafe {
+        ORIGINAL_TERMINAL = Some(original_termios);
+    }
 }
 
 fn disable_terminal(original_terminal: &Termios) {
     tcsetattr(io::stdin().as_raw_fd(), TCSANOW, original_terminal).unwrap();
 }
 
+fn cleanup() {
+    write_to_stdout("\x1b[2J");
+    write_to_stdout("\x1b[H");
+
+    unsafe {
+        if let Some(original_termios) = &mut ORIGINAL_TERMINAL {
+            disable_terminal(original_termios);
+        }
+    }
+}
+
 fn die(s: &str) {
+    cleanup();
     eprintln!("Error: {}", s);
     process::exit(1);
 }
@@ -65,7 +56,7 @@ fn ctrl_char(k: char) -> u8 {
     (k as u8) & 0x1f
 }
 
-fn write_to_stdout(s : &str) {
+fn write_to_stdout(s: &str) {
     let mut stdout = io::stdout().lock();
     let write_ok = stdout.write(s.as_bytes());
     if let Err(error) = write_ok {
@@ -100,30 +91,24 @@ fn editor_read_key() -> u8 {
 }
 
 /** Returns true if should continue */
-fn editor_process_keypress() -> bool {
+fn editor_process_keypress() {
     let c: u8 = editor_read_key();
 
     // Exit on q
     match c {
         _ if c == ctrl_char('q') => {
-            return false;
+            cleanup();
+            process::exit(0);
         }
         _ => {}
     };
-
-    true
 }
 
 fn main() {
-    let mut cleanup = Cleanup::default();
-
-    enable_raw_mode(&mut cleanup);
+    enable_raw_mode();
 
     loop {
         editor_refresh_screen();
-        let result = editor_process_keypress();
-        if !result {
-            break;
-        }
+        editor_process_keypress();
     }
 }
