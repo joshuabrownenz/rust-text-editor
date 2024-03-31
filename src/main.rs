@@ -65,9 +65,9 @@ fn ctrl_char(k: char) -> u8 {
     (k as u8) & 0x1f
 }
 
-fn editor_refresh_screen() {
+fn write_to_stdout(s : &str) {
     let mut stdout = io::stdout().lock();
-    let write_ok = stdout.write("\x1b[2J".as_bytes());
+    let write_ok = stdout.write(s.as_bytes());
     if let Err(error) = write_ok {
         die(&format!("Write error: {}", error));
     }
@@ -76,6 +76,14 @@ fn editor_refresh_screen() {
     if let Err(error) = flush_ok {
         die(&format!("Flush error: {}", error));
     }
+}
+
+fn editor_refresh_screen() {
+    // Clear screen
+    write_to_stdout("\x1b[2J");
+
+    // Position at the top of the screen
+    write_to_stdout("\x1b[H");
 }
 
 fn editor_read_key() -> u8 {
