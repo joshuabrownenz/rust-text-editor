@@ -61,6 +61,10 @@ fn die(s: &str) {
     process::exit(1);
 }
 
+fn ctrl_char(k : char) -> u8 {
+    (k as u8) & 0x1f
+}
+
 fn main() {
     let mut cleanup = Cleanup::default();
 
@@ -75,17 +79,17 @@ fn main() {
             }
         }
 
-        let input = buf[0] as i32;
-        let is_control_char: bool = unsafe { libc::iscntrl(input) == 1 };
+        let char: u8 = buf[0];
+        let is_control_char: bool = unsafe { libc::iscntrl(char as i32) == 1 };
 
         if is_control_char {
-            print!("{}\r\n", input);
+            print!("{}\r\n", char);
         } else {
-            print!("{} ('{}')\r\n", input, buf[0] as char);
+            print!("{} ('{}')\r\n", char, char as char);
         }
 
         // Exit on q
-        if buf == "q".as_bytes() {
+        if char == ctrl_char('q') {
             break;
         }
     }
