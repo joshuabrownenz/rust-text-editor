@@ -1,6 +1,7 @@
 use std::{
     io::{self, ErrorKind, Read},
-    os::fd::AsRawFd, process,
+    os::fd::AsRawFd,
+    process,
 };
 
 use termios::*;
@@ -31,6 +32,28 @@ impl Drop for Cleanup {
             disable_terminal(original_termios);
         }
     }
+}
+
+fn enable_raw_mode(cleanup: &mut Cleanup) {
+    let original_termios = Termios::from_fd(io::stdin().as_raw_fd()).unwrap();
+
+    let mut termios = original_termios;
+
+    termios.c_iflag &= !(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    termios.c_oflag &= !(OPOST);
+    termios.c_cflag |= CS8;
+    termios.c_lflag &= !(ECHO | ICANON | IEXTEN | ISIG);
+    termios.c_cc[VMIN] = 0;
+    termios.c_cc[VTIME] = 1;
+
+    // Apply the updated termios settings
+    tcsetattr(io::stdin().as_raw_fd(), TCSANOW, &termios).unwrap();
+
+    cleanup.set_original_termios(original_termios);
+}
+
+fn disable_terminal(original_terminal: &Termios) {
+    tcsetattr(io::stdin().as_raw_fd(), TCSANOW, original_terminal).unwrap();
 }
 
 fn die(s: &str) {
@@ -66,26 +89,4 @@ fn main() {
             break;
         }
     }
-}
-
-fn enable_raw_mode(cleanup: &mut Cleanup) {
-    let original_termios = Termios::from_fd(io::stdin().as_raw_fd()).unwrap();
-
-    let mut termios = original_termios;
-
-    termios.c_iflag &= !(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-    termios.c_oflag &= !(OPOST);
-    termios.c_cflag |= CS8;
-    termios.c_lflag &= !(ECHO | ICANON | IEXTEN | ISIG);
-    termios.c_cc[VMIN] = 0;
-    termios.c_cc[VTIME] = 1;
-
-    // Apply the updated termios settings
-    tcsetattr(io::stdin().as_raw_fd(), TCSANOW, &termios).unwrap();
-
-    cleanup.set_original_termios(original_termios);
-}
-
-fn disable_terminal(original_terminal: &Termios) {
-    tcsetattr(io::stdin().as_raw_fd(), TCSANOW, original_terminal).unwrap();
 }
