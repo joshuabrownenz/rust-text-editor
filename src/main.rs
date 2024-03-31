@@ -1,5 +1,5 @@
 use std::{
-    io::{self, ErrorKind, Read},
+    io::{self, ErrorKind, Read, Write},
     os::fd::AsRawFd,
     process,
 };
@@ -61,8 +61,49 @@ fn die(s: &str) {
     process::exit(1);
 }
 
-fn ctrl_char(k : char) -> u8 {
+fn ctrl_char(k: char) -> u8 {
     (k as u8) & 0x1f
+}
+
+fn editor_refresh_screen() {
+    let mut stdout = io::stdout().lock();
+    let write_ok = stdout.write("\x1b[2J".as_bytes());
+    if let Err(error) = write_ok {
+        die(&format!("Write error: {}", error));
+    }
+
+    let flush_ok = stdout.flush();
+    if let Err(error) = flush_ok {
+        die(&format!("Flush error: {}", error));
+    }
+}
+
+fn editor_read_key() -> u8 {
+    let mut buf: [u8; 1] = [0; 1];
+
+    let read_ok: Result<(), io::Error> = io::stdin().lock().read_exact(&mut buf);
+    if let Err(error) = read_ok {
+        if error.kind() != ErrorKind::UnexpectedEof {
+            die(&format!("Read error: {}", error));
+        }
+    }
+
+    buf[0]
+}
+
+/** Returns true if should continue */
+fn editor_process_keypress() -> bool {
+    let c: u8 = editor_read_key();
+
+    // Exit on q
+    match c {
+        _ if c == ctrl_char('q') => {
+            return false;
+        }
+        _ => {}
+    };
+
+    true
 }
 
 fn main() {
@@ -71,25 +112,9 @@ fn main() {
     enable_raw_mode(&mut cleanup);
 
     loop {
-        let mut buf: [u8; 1] = [0; 1];
-        let read_ok: Result<(), io::Error> = io::stdin().lock().read_exact(&mut buf);
-        if let Err(error) = read_ok {
-            if error.kind() != ErrorKind::UnexpectedEof {
-                die(&format!("Read error: {}", error));
-            }
-        }
-
-        let char: u8 = buf[0];
-        let is_control_char: bool = unsafe { libc::iscntrl(char as i32) == 1 };
-
-        if is_control_char {
-            print!("{}\r\n", char);
-        } else {
-            print!("{} ('{}')\r\n", char, char as char);
-        }
-
-        // Exit on q
-        if char == ctrl_char('q') {
+        editor_refresh_screen();
+        let result = editor_process_keypress();
+        if !result {
             break;
         }
     }
