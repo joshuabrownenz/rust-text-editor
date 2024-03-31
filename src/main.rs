@@ -1,6 +1,6 @@
 use std::{
-    io::{self, Read},
-    os::fd::AsRawFd,
+    io::{self, ErrorKind, Read},
+    os::fd::AsRawFd, process,
 };
 
 use termios::*;
@@ -33,22 +33,23 @@ impl Drop for Cleanup {
     }
 }
 
+fn die(s: &str) {
+    eprintln!("Error: {}", s);
+    process::exit(1);
+}
+
 fn main() {
     let mut cleanup = Cleanup::default();
 
     enable_raw_mode(&mut cleanup);
 
-    let mut buf: [u8; 1] = [0; 1];
     loop {
-        let read = io::stdin().lock().read_exact(&mut buf);
-        if read.is_err() {
-            println!("Read error: {}", read.err().unwrap());
-            break;
-        }
-
-        // Exit on q
-        if buf == "q".as_bytes() {
-            break;
+        let mut buf: [u8; 1] = [0; 1];
+        let read_ok: Result<(), io::Error> = io::stdin().lock().read_exact(&mut buf);
+        if let Err(error) = read_ok {
+            if error.kind() != ErrorKind::UnexpectedEof {
+                die(&format!("Read error: {}", error));
+            }
         }
 
         let input = buf[0] as i32;
@@ -59,6 +60,11 @@ fn main() {
         } else {
             print!("{} ('{}')\r\n", input, buf[0] as char);
         }
+
+        // Exit on q
+        if buf == "q".as_bytes() {
+            break;
+        }
     }
 }
 
@@ -67,11 +73,12 @@ fn enable_raw_mode(cleanup: &mut Cleanup) {
 
     let mut termios = original_termios;
 
-    // Turn off ECHO
     termios.c_iflag &= !(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
     termios.c_oflag &= !(OPOST);
     termios.c_cflag |= CS8;
     termios.c_lflag &= !(ECHO | ICANON | IEXTEN | ISIG);
+    termios.c_cc[VMIN] = 0;
+    termios.c_cc[VTIME] = 1;
 
     // Apply the updated termios settings
     tcsetattr(io::stdin().as_raw_fd(), TCSANOW, &termios).unwrap();
