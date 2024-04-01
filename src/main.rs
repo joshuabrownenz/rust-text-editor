@@ -1,10 +1,10 @@
+use lazy_static::lazy_static;
 use std::{
     io::{self, ErrorKind, Read, Write},
     os::fd::AsRawFd,
     process,
     sync::{Arc, RwLock},
 };
-use lazy_static::lazy_static;
 use termios::*;
 
 mod error;
@@ -17,6 +17,7 @@ struct EditorData {
     original_terminal: Option<Termios>,
 }
 
+/*** EditorConfig ***/
 struct EditorConfig {
     data: RwLock<EditorData>,
 }
@@ -47,6 +48,27 @@ impl EditorConfig {
     }
 }
 
+/*** AppendBuffer ***/
+struct AppendBuffer {
+    buf: String,
+}
+
+impl AppendBuffer {
+    pub fn new() -> Self {
+        AppendBuffer { buf: String::new() }
+    }
+
+    pub fn push(&mut self, s: &str) {
+        self.buf.push_str(s)
+    }
+
+    pub fn write(self) {
+        write_to_stdout(&self.buf);
+        flush_stdout();
+    }
+}
+
+/*** Static Variables ***/
 lazy_static! {
     static ref EDITOR: Arc<EditorConfig> = Arc::new(EditorConfig {
         data: RwLock::new(EditorData {
@@ -57,6 +79,7 @@ lazy_static! {
     });
 }
 
+/*** Terminal ***/
 fn enable_raw_mode() {
     let original_termios = Termios::from_fd(io::stdin().as_raw_fd()).unwrap();
 
@@ -96,10 +119,19 @@ fn die(s: &str) {
     process::exit(1);
 }
 
+fn get_window_size() {
+    if let Some((w, h)) = term_size::dimensions() {
+        EDITOR.set_dimensions(h, w);
+    } else {
+        die("get dimensions");
+    }
+}
+
 fn ctrl_char(k: char) -> u8 {
     (k as u8) & 0x1f
 }
 
+/*** Output ***/
 fn write_to_stdout(s: &str) {
     let mut stdout = io::stdout().lock();
     let write_ok = stdout.write(s.as_bytes());
@@ -121,39 +153,39 @@ fn init_editor() {
 }
 
 /** Requires a flush to be guaranteed on the screen */
-fn editor_draw_rows() {
+fn editor_draw_rows(buffer: &mut AppendBuffer) {
     let num_rows = EDITOR.get_num_rows();
-    for y in 0..num_rows - 1 {
-        // write_to_stdout("~");
-        write_to_stdout(&format!("{}", num_rows));
+    for y in 0..num_rows {
+        // buffer.push("~");
+        buffer.push(&format!("{}", y));
+        buffer.push("\x1b[K");
         if y < num_rows - 1 {
-            write_to_stdout("\r\n");
+            buffer.push("\r\n");
         }
     }
 }
 
-fn get_window_size() {
-    if let Some((w, h)) = term_size::dimensions() {
-        EDITOR.set_dimensions(h, w);
-    } else {
-        die("get dimensions");
-    }
-}
-
 fn editor_refresh_screen() {
-    // Clear screen
-    write_to_stdout("\x1b[2J");
+    let mut buffer = AppendBuffer::new();
+
+    // Hide cursor
+    buffer.push("\x1b[?25l");
 
     // Position at the top of the screen
-    write_to_stdout("\x1b[H");
+    buffer.push("\x1b[H");
 
-    editor_draw_rows();
+    editor_draw_rows(&mut buffer);
 
-    write_to_stdout("\x1b[H");
+    // Position at the top of the screen
+    buffer.push("\x1b[H");
 
-    flush_stdout();
+    // Show cursor
+    buffer.push("\x1b[?25h");
+
+    buffer.write();
 }
 
+/*** Input ***/
 fn editor_read_key() -> u8 {
     let mut buf: [u8; 1] = [0; 1];
 
