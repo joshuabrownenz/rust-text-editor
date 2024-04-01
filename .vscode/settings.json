@@ -1,6 +1,22 @@
 {
-    "cSpell.words": [
-        "lflag",
-        "termios"
-    ]
+  "cSpell.words": [
+    "BRKINT",
+    "cflag",
+    "ICANON",
+    "ICRNL",
+    "IEXTEN",
+    "iflag",
+    "INPCK",
+    "ISIG",
+    "ISTRIP",
+    "IXON",
+    "lflag",
+    "oflag",
+    "OPOST",
+    "TCSANOW",
+    "tcsetattr",
+    "termios",
+    "VMIN",
+    "VTIME"
+]
 }

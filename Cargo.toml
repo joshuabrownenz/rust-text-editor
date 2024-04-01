@@ -6,6 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+lazy_static = "1.4.0"
 libc = "0.2.153"
+term_size = "0.3.2"
 termios = "0.3.3"
 thiserror = "1.0.58"

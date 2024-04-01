@@ -1,21 +1,61 @@
 use std::{
-    borrow::Borrow,
     io::{self, ErrorKind, Read, Write},
     os::fd::AsRawFd,
     process,
-    sync::Mutex,
+    sync::{Arc, RwLock},
 };
-
+use lazy_static::lazy_static;
 use termios::*;
 
 mod error;
 pub mod prelude;
 
-static ORIGINAL_TERMINAL: Mutex<Option<Termios>> = Mutex::new(None);
+#[derive(Default)]
+struct EditorData {
+    num_rows: usize,
+    num_columns: usize,
+    original_terminal: Option<Termios>,
+}
 
-// lazy_static! {
-//     static ref my_mutex: Mutex<i32> = Mutex::new(0i32);
-// }
+struct EditorConfig {
+    data: RwLock<EditorData>,
+}
+
+impl EditorConfig {
+    pub fn set_original_terminal(&self, original_terminal: Termios) {
+        let mut data = self.data.write().unwrap();
+        data.original_terminal = Some(original_terminal);
+    }
+
+    pub fn set_dimensions(&self, num_rows: usize, num_columns: usize) {
+        let mut data = self.data.write().unwrap();
+        data.num_rows = num_rows;
+        data.num_columns = num_columns;
+    }
+
+    // GETTERs
+    pub fn get_num_rows(&self) -> usize {
+        self.data.read().unwrap().num_rows
+    }
+
+    pub fn get_num_columns(&self) -> usize {
+        self.data.read().unwrap().num_columns
+    }
+
+    pub fn get_original_terminal(&self) -> Option<Termios> {
+        self.data.read().unwrap().original_terminal
+    }
+}
+
+lazy_static! {
+    static ref EDITOR: Arc<EditorConfig> = Arc::new(EditorConfig {
+        data: RwLock::new(EditorData {
+            num_rows: 0,
+            num_columns: 0,
+            original_terminal: None,
+        }),
+    });
+}
 
 fn enable_raw_mode() {
     let original_termios = Termios::from_fd(io::stdin().as_raw_fd()).unwrap();
@@ -32,7 +72,7 @@ fn enable_raw_mode() {
     // Apply the updated termios settings
     tcsetattr(io::stdin().as_raw_fd(), TCSANOW, &termios).unwrap();
 
-    *(ORIGINAL_TERMINAL.lock().unwrap()) = Some(original_termios);
+    EDITOR.set_original_terminal(original_termios);
 }
 
 fn disable_terminal(original_termios: &Termios) {
@@ -45,7 +85,7 @@ fn cleanup() {
 
     flush_stdout();
 
-    if let Some(original_termios) = ORIGINAL_TERMINAL.lock().unwrap().as_ref() {
+    if let Some(original_termios) = &EDITOR.get_original_terminal() {
         disable_terminal(original_termios);
     }
 }
@@ -76,10 +116,27 @@ fn flush_stdout() {
     }
 }
 
+fn init_editor() {
+    get_window_size();
+}
+
 /** Requires a flush to be guaranteed on the screen */
 fn editor_draw_rows() {
-    for y in 0..24 {
-        write_to_stdout("~\r\n");
+    let num_rows = EDITOR.get_num_rows();
+    for y in 0..num_rows - 1 {
+        // write_to_stdout("~");
+        write_to_stdout(&format!("{}", num_rows));
+        if y < num_rows - 1 {
+            write_to_stdout("\r\n");
+        }
+    }
+}
+
+fn get_window_size() {
+    if let Some((w, h)) = term_size::dimensions() {
+        EDITOR.set_dimensions(h, w);
+    } else {
+        die("get dimensions");
     }
 }
 
@@ -126,6 +183,7 @@ fn editor_process_keypress() {
 
 fn main() {
     enable_raw_mode();
+    init_editor();
 
     loop {
         editor_refresh_screen();
