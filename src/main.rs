@@ -1,6 +1,7 @@
 use std::{
+    fs::OpenOptions,
     io::{self, ErrorKind, Read, Write},
-    os::fd::AsRawFd,
+    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     process,
     time::Instant,
 };
@@ -13,10 +14,11 @@ pub mod prelude;
 const KILO_VERSION: &str = "0.0.1";
 const KILO_TAB_STOP: usize = 8;
 const KILO_MESSAGE_BAR_HEIGHT: usize = 2;
+const KILO_QUIT_TIMES: usize = 3;
 
 // Editor Keys
-const CARRIAGE_RETURN: usize = 13;
-const BACKSPACE: usize = 127;
+const CARRIAGE_RETURN_KEY: usize = 13;
+const BACKSPACE_KEY: usize = 127;
 const ARROW_LEFT_KEY: usize = 1000;
 const ARROW_RIGHT_KEY: usize = 1001;
 const ARROW_UP_KEY: usize = 1002;
@@ -35,10 +37,14 @@ struct EditorRow {
 
 impl EditorRow {
     pub fn new(chars: String) -> Self {
-        EditorRow {
+        let mut row = EditorRow {
             chars,
             render: String::new(),
-        }
+        };
+
+        row.update_render();
+
+        row
     }
 
     pub fn len(&self) -> usize {
@@ -89,6 +95,22 @@ impl EditorRow {
         self.chars.insert(at, c);
         self.update_render();
     }
+
+    pub fn delete_char(&mut self, at: usize) {
+        self.chars.remove(at);
+        self.update_render();
+    }
+
+    pub fn append_string(&mut self, s: &str) {
+        self.chars.push_str(s);
+        self.update_render();
+    }
+
+    pub fn split_off(&mut self, at: usize) -> String {
+        let split = self.chars.split_off(at);
+        self.update_render();
+        split
+    }
 }
 
 /*** AppendBuffer ***/
@@ -121,6 +143,8 @@ struct Editor {
     screen_num_rows: usize,
     screen_num_columns: usize,
     rows: Vec<EditorRow>,
+    dirty: usize,
+    quit_times: usize,
     filename: Option<String>,
     status_message: Option<String>,
     status_message_time: Instant,
@@ -138,6 +162,8 @@ impl Editor {
             screen_num_rows: 0,
             screen_num_columns: 0,
             rows: vec![],
+            dirty: 0,
+            quit_times: KILO_QUIT_TIMES,
             filename: None,
             status_message: None,
             status_message_time: Instant::now(),
@@ -149,10 +175,14 @@ impl Editor {
         editor
     }
 
-    pub fn append_row(&mut self, row: String) {
-        let mut editor_row = EditorRow::new(row);
-        editor_row.update_render();
-        self.rows.push(editor_row);
+    pub fn editor_insert_row(&mut self, at: usize, row: String) {
+        if at > self.get_num_rows() {
+            return;
+        }
+
+        let editor_row = EditorRow::new(row);
+        self.rows.insert(at, editor_row);
+        self.dirty += 1;
     }
 
     pub fn set_original_terminal(&mut self, original_terminal: Termios) {
@@ -168,7 +198,7 @@ impl Editor {
         }
     }
 
-    pub fn get_text_num_rows(&self) -> usize {
+    pub fn get_num_rows(&self) -> usize {
         self.rows.len()
     }
 
@@ -242,12 +272,13 @@ impl Editor {
         }
 
         let mut status = format!(
-            "{} - {} lines",
+            "{} - {} lines {}",
             truncated_filename,
-            self.get_text_num_rows()
+            self.get_num_rows(),
+            if self.dirty != 0 { "(modified)" } else { "" }
         );
 
-        let r_status = format!("{}/{}", self.cursor_y + 1, self.get_text_num_rows());
+        let r_status = format!("{}/{}", self.cursor_y + 1, self.get_num_rows());
 
         if status.len() > self.screen_num_columns {
             status = status[..self.screen_num_columns].to_string();
@@ -281,7 +312,7 @@ impl Editor {
     /*** Editor ***/
     fn editor_scroll(&mut self) {
         self.render_cursor_x = 0;
-        if self.cursor_y < self.get_text_num_rows() {
+        if self.cursor_y < self.get_num_rows() {
             self.render_cursor_x =
                 self.rows[self.cursor_y].cursor_x_to_render_cursor_x(self.cursor_x);
         }
@@ -313,12 +344,12 @@ impl Editor {
         let row_offset = self.row_offset;
         let column_offset = self.column_offset;
 
-        let text_num_rows = self.get_text_num_rows();
+        let num_rows = self.get_num_rows();
 
         for y in 0..editor_num_rows {
             let file_row = y + row_offset;
-            if file_row >= text_num_rows {
-                if text_num_rows == 0 && y == editor_num_rows / 3 {
+            if file_row >= num_rows {
+                if num_rows == 0 && y == editor_num_rows / 3 {
                     let mut welcome_msg = format!("Kilo editor -- version {}", KILO_VERSION);
                     if welcome_msg.len() > editor_num_columns {
                         welcome_msg = welcome_msg[..editor_num_columns].to_string();
@@ -396,9 +427,13 @@ impl Editor {
     fn editor_open(&mut self, filename: &str) {
         let file_contents = match std::fs::read_to_string(filename) {
             Ok(file) => file,
-            Err(_) => {
-                self.die("file read failed");
-                return;
+            Err(error) => {
+                if error.kind() == ErrorKind::NotFound {
+                    String::new()
+                } else {
+                    self.die(&format!("file read failed {}", error.kind()));
+                    return;
+                }
             }
         };
 
@@ -411,22 +446,118 @@ impl Editor {
             }
 
             let line = &line[..length];
-            // println!("Append row: {} (len: {})", line, length);
-            self.append_row(line.to_string());
+
+            self.editor_insert_row(self.get_num_rows(), line.to_string());
         }
 
         self.filename = Some(filename.to_string());
+        self.dirty = 0;
+    }
+
+    fn editor_save(&mut self) {
+        if self.filename.is_none() {
+            self.editor_set_status_message("No file open to save");
+        }
+
+        let buf = self.editor_rows_to_string();
+
+        let num_new_lines = buf.chars().filter(|&c| c == '\n').count();
+
+        match OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .mode(0o644)
+            .open(self.filename.as_ref().unwrap())
+        {
+            Ok(mut file) => match file.write_all(buf.as_bytes()) {
+                Ok(_) => {
+                    self.editor_set_status_message(&format!(
+                        "{} bytes written to disk {num_new_lines}",
+                        buf.len()
+                    ));
+                    self.dirty = 0;
+                }
+                Err(error) => {
+                    self.editor_set_status_message(&format!("Error saving file: {}", error))
+                }
+            },
+            Err(error) => self.editor_set_status_message(&format!("Error opening file: {}", error)),
+        }
+    }
+
+    fn editor_rows_to_string(&self) -> String {
+        let mut buf = String::new();
+        let rows_len = self.rows.len();
+        for (idx, row) in self.rows.iter().enumerate() {
+            buf.push_str(&row.chars);
+
+            if idx < rows_len - 1 {
+                buf.push('\n');
+            }
+        }
+
+        buf
     }
 
     /*** Editor operations ***/
     fn editor_insert_char(&mut self, c: char) {
-        if self.cursor_y == self.get_text_num_rows() {
-            self.append_row(String::new());
+        if self.cursor_y == self.get_num_rows() {
+            self.editor_insert_row(self.get_num_rows(), String::new());
         }
 
         let row = &mut self.rows[self.cursor_y];
         row.insert_char(self.cursor_x, c);
         self.cursor_x += 1;
+        self.dirty += 1;
+    }
+
+    fn editor_insert_newline(&mut self) {
+        if self.cursor_x == 0 {
+            self.editor_insert_row(self.cursor_y, String::new());
+        } else {
+            let row = &mut self.rows[self.cursor_y];
+            let new_row = row.split_off(self.cursor_x);
+            self.editor_insert_row(self.cursor_y + 1, new_row);
+            self.dirty += 1;
+        }
+
+        self.cursor_y += 1;
+        self.cursor_x = 0;
+    }
+
+    fn editor_delete_row(&mut self, at: usize) -> Option<EditorRow> {
+        if at >= self.get_num_rows() {
+            return None;
+        }
+
+        self.dirty += 1;
+        Some(self.rows.remove(at))
+    }
+
+    fn editor_delete_char(&mut self) {
+        if self.cursor_y == self.screen_num_rows {
+            return;
+        };
+        if self.cursor_x == 0 && self.cursor_y == 0 {
+            return;
+        }
+
+        if self.cursor_x > 0 {
+            let row = &mut self.rows[self.cursor_y];
+            row.delete_char(self.cursor_x - 1);
+            self.cursor_x -= 1;
+            self.dirty += 1;
+        } else {
+            self.cursor_x = self.rows[self.cursor_y - 1].len();
+            let deleted_row = self.editor_delete_row(self.cursor_y);
+            if let Some(row) = deleted_row {
+                self.rows[self.cursor_y - 1].append_string(&row.chars);
+            }
+
+            self.cursor_y -= 1;
+            // Dirty is incremented in editor_delete_row
+        }
     }
 
     /*** Input ***/
@@ -510,7 +641,7 @@ impl Editor {
     }
 
     fn editor_move_cursor(&mut self, key: usize) {
-        let on_row = self.cursor_y < self.get_text_num_rows();
+        let on_row = self.cursor_y < self.get_num_rows();
         match key {
             ARROW_LEFT_KEY => {
                 if self.cursor_x != 0 {
@@ -532,7 +663,7 @@ impl Editor {
                 self.cursor_y = self.cursor_y.saturating_sub(1);
             }
             ARROW_DOWN_KEY => {
-                if self.cursor_y < self.get_text_num_rows() {
+                if self.cursor_y < self.get_num_rows() {
                     self.cursor_y += 1;
                 }
             }
@@ -540,7 +671,7 @@ impl Editor {
         }
 
         // Snap to end of line
-        let current_row_len = if self.cursor_y < self.get_text_num_rows() {
+        let current_row_len = if self.cursor_y < self.get_num_rows() {
             self.rows[self.cursor_y].render.len()
         } else {
             0
@@ -558,11 +689,22 @@ impl Editor {
         // Exit on q
         match key {
             _ if key == Editor::ctrl_char('q') => {
+                if self.dirty != 0 && self.quit_times > 0 {
+                    self.editor_set_status_message(&format!(
+                        "WARNING!!! File has unsaved changes. Press Ctrl-Q {} more times to quit.",
+                        self.quit_times
+                    ));
+                    self.quit_times -= 1;
+                    return;
+                }
                 self.cleanup();
                 process::exit(0);
             }
-            CARRIAGE_RETURN => {
-                // TODO:
+            _ if key == Editor::ctrl_char('s') => {
+                self.editor_save();
+            }
+            CARRIAGE_RETURN_KEY => {
+                self.editor_insert_newline();
             }
             ARROW_LEFT_KEY | ARROW_RIGHT_KEY | ARROW_UP_KEY | ARROW_DOWN_KEY => {
                 self.editor_move_cursor(key)
@@ -572,8 +714,8 @@ impl Editor {
                     self.cursor_y = self.row_offset;
                 } else if key == PAGE_DOWN_KEY {
                     self.cursor_y = self.row_offset + self.screen_num_rows - 1;
-                    if self.cursor_y > self.get_text_num_rows() {
-                        self.cursor_y = self.get_text_num_rows();
+                    if self.cursor_y > self.get_num_rows() {
+                        self.cursor_y = self.get_num_rows();
                     }
                 }
 
@@ -589,14 +731,24 @@ impl Editor {
             }
             HOME_KEY => self.cursor_x = 0,
             END_KEY => {
-                if self.cursor_y < self.get_text_num_rows() {
+                if self.cursor_y < self.get_num_rows() {
                     self.cursor_x = self.rows[self.cursor_y].len();
                 }
             }
-            _ if key == Editor::ctrl_char('h') | BACKSPACE | DELETE_KEY => {
-                // TODO:
+            BACKSPACE_KEY | DELETE_KEY => {
+                if key == DELETE_KEY {
+                    self.editor_move_cursor(ARROW_RIGHT_KEY);
+                }
+                self.editor_delete_char();
             }
-            _ if key == Editor::ctrl_char('l') | ESCAPE_KEY => {
+            _ if key == Editor::ctrl_char('h') => {
+                self.editor_delete_char();
+            }
+            ESCAPE_KEY => {
+                // Do nothing
+            }
+            _ if key == Editor::ctrl_char('l') => {
+                // Same as ESCAPE
                 // Do nothing
             }
             _ => {
@@ -606,6 +758,8 @@ impl Editor {
                 }
             }
         };
+
+        self.quit_times = KILO_QUIT_TIMES;
     }
 }
 
@@ -619,7 +773,7 @@ fn main() {
         editor.editor_open(&args[1]);
     }
 
-    editor.editor_set_status_message("HELP: Ctrl-Q = quit");
+    editor.editor_set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit");
 
     loop {
         editor.editor_refresh_screen();
