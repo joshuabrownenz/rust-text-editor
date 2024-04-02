@@ -4,7 +4,7 @@ use std::{
     isize,
     os::fd::AsRawFd,
     process,
-    sync::{Arc, RwLock, RwLockReadGuard},
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 use termios::*;
 
@@ -15,6 +15,8 @@ pub mod prelude;
 struct EditorConfigData {
     cursor_x: usize,
     cursor_y: usize,
+    row_offset: usize,
+    column_offset: usize,
     editor_num_rows: usize,
     editor_num_columns: usize,
     rows: Vec<String>,
@@ -44,6 +46,14 @@ impl EditorConfigData {
         self.cursor_y = cursor_y;
     }
 
+    pub fn set_row_offset(&mut self, row_offset: usize) {
+        self.row_offset = row_offset;
+    }
+
+    pub fn set_column_offset(&mut self, column_offset: usize) {
+        self.column_offset = column_offset;
+    }
+
     // GETTERs
     pub fn get_editor_num_rows(&self) -> usize {
         self.editor_num_rows
@@ -63,6 +73,14 @@ impl EditorConfigData {
 
     pub fn get_text_num_rows(&self) -> usize {
         self.rows.len()
+    }
+
+    pub fn get_row_offset(&self) -> usize {
+        self.row_offset
+    }
+
+    pub fn get_column_offset(&self) -> usize {
+        self.column_offset
     }
 }
 
@@ -103,6 +121,14 @@ impl EditorConfig {
         self.data.write().unwrap().rows = rows
     }
 
+    pub fn set_row_offset(&self, row_offset: usize) {
+        self.data.write().unwrap().set_row_offset(row_offset)
+    }
+
+    pub fn set_column_offset(&self, column_offset: usize) {
+        self.data.write().unwrap().set_column_offset(column_offset)
+    }
+
     // GETTERs
     pub fn get_editor_num_rows(&self) -> usize {
         self.data.read().unwrap().get_editor_num_rows()
@@ -124,8 +150,20 @@ impl EditorConfig {
         self.data.read().unwrap()
     }
 
+    pub fn acquire_write_lock(&self) -> RwLockWriteGuard<EditorConfigData> {
+        self.data.write().unwrap()
+    }
+
     pub fn get_text_num_rows(&self) -> usize {
         self.data.read().unwrap().get_text_num_rows()
+    }
+
+    pub fn get_row_offset(&self) -> usize {
+        self.data.read().unwrap().get_row_offset()
+    }
+
+    pub fn get_column_offset(&self) -> usize {
+        self.data.read().unwrap().get_column_offset()
     }
 }
 
@@ -171,6 +209,8 @@ lazy_static! {
         data: RwLock::new(EditorConfigData {
             cursor_x: 0,
             cursor_y: 0,
+            row_offset: 0,
+            column_offset: 0,
             editor_num_rows: 0,
             editor_num_columns: 0,
             rows: vec![],
@@ -251,10 +291,39 @@ fn flush_stdout() {
 fn init_editor() {
     EDITOR.set_cursor_x(0);
     EDITOR.set_cursor_y(0);
+    EDITOR.set_row_offset(0);
+    EDITOR.set_column_offset(0);
     get_window_size();
 }
 
 /*** Editor ***/
+fn editor_scroll() {
+    let mut editor = EDITOR.acquire_write_lock();
+
+    let (cursor_x, cursor_y) = editor.get_cursor();
+
+    // Row offset
+    let row_offset = editor.get_row_offset();
+    if cursor_y < row_offset {
+        editor.set_row_offset(cursor_y);
+    }
+
+    let editor_num_rows = editor.get_editor_num_rows();
+    if cursor_y >= row_offset + editor_num_rows {
+        editor.set_row_offset(cursor_y - editor_num_rows + 1);
+    }
+
+    // Column offset
+    let column_offset = editor.get_column_offset();
+    if cursor_x < column_offset {
+        editor.set_column_offset(cursor_x);
+    }
+
+    let editor_num_columns = editor.get_editor_num_columns();
+    if cursor_x >= column_offset + editor_num_columns {
+        editor.set_column_offset(cursor_x - editor_num_columns + 1);
+    }
+}
 
 /** Requires a flush to be guaranteed on the screen */
 fn editor_draw_rows(buffer: &mut AppendBuffer) {
@@ -263,8 +332,12 @@ fn editor_draw_rows(buffer: &mut AppendBuffer) {
     let editor_num_rows = editor.get_editor_num_rows();
     let editor_num_columns = editor.get_editor_num_columns();
 
+    let row_offset = editor.get_row_offset();
+    let column_offset = editor.get_column_offset();
+
     for y in 0..editor_num_rows {
-        if y >= editor.get_text_num_rows() {
+        let file_row = y + row_offset;
+        if file_row >= editor.get_text_num_rows() {
             if editor.get_text_num_rows() == 0 && y == editor_num_rows / 3 {
                 let mut welcome_msg = format!("Kilo editor -- version {}", KILO_VERSION);
                 if welcome_msg.len() > editor_num_columns {
@@ -286,7 +359,14 @@ fn editor_draw_rows(buffer: &mut AppendBuffer) {
                 buffer.push("~");
             }
         } else {
-            let mut row: &str = &editor.rows[y];
+            let mut row: &str = &editor.rows[file_row];
+            // Apply column offset
+            if (column_offset as usize) < row.len() {
+                row = &row[column_offset..];
+            } else {
+                row = "";
+            }
+
             let row_len = row.len();
             if row_len > editor_num_columns {
                 row = &row[..editor_num_columns];
@@ -302,6 +382,8 @@ fn editor_draw_rows(buffer: &mut AppendBuffer) {
 }
 
 fn editor_refresh_screen() {
+    editor_scroll();
+
     let mut buffer = AppendBuffer::new();
 
     // Hide cursor
@@ -314,7 +396,13 @@ fn editor_refresh_screen() {
 
     // Position cursor at cursor_x and cursor_y
     let (cursor_x, cursor_y) = EDITOR.get_cursor();
-    buffer.push(&format!("\x1b[{};{}H", cursor_y + 1, cursor_x + 1));
+    let row_offset = EDITOR.get_row_offset();
+    let column_offset = EDITOR.get_column_offset();
+    buffer.push(&format!(
+        "\x1b[{};{}H",
+        (cursor_y - row_offset) + 1,
+        (cursor_x - column_offset) + 1
+    ));
 
     // Show cursor
     buffer.push("\x1b[?25h");
@@ -422,30 +510,52 @@ fn editor_read_key() -> usize {
 }
 
 fn editor_move_cursor(key: usize) {
-    fn move_cursor(offset_x: isize, offset_y: isize) {
-        let (cursor_x, cursor_y) = EDITOR.get_cursor();
-        let cursor_x = cursor_x as isize + offset_x;
-        let cursor_y = cursor_y as isize + offset_y;
+    let mut editor = EDITOR.acquire_write_lock();
 
-        let num_rows = EDITOR.get_editor_num_rows();
-        let num_columns = EDITOR.get_editor_num_columns();
-
-        if cursor_x >= 0 && cursor_x < num_columns as isize {
-            EDITOR.set_cursor_x(cursor_x as usize);
-        }
-
-        if cursor_y >= 0 && cursor_y < num_rows as isize {
-            EDITOR.set_cursor_y(cursor_y as usize);
-        }
-    }
-
+    let (mut cursor_x, mut cursor_y) = editor.get_cursor();
+    let on_row = cursor_y < editor.get_text_num_rows();
     match key {
-        ARROW_LEFT_KEY => move_cursor(-1, 0),
-        ARROW_RIGHT_KEY => move_cursor(1, 0),
-        ARROW_UP_KEY => move_cursor(0, -1),
-        ARROW_DOWN_KEY => move_cursor(0, 1),
+        ARROW_LEFT_KEY => {
+            if cursor_x != 0 {
+                cursor_x -= 1;
+            } else if cursor_y > 0 {
+                cursor_y -= 1;
+                cursor_x = editor.rows[cursor_y].len();
+            }
+        }
+        ARROW_RIGHT_KEY => {
+            if on_row && cursor_x < editor.rows[cursor_y].len() {
+                cursor_x += 1;
+            } else if on_row && cursor_x == editor.rows[cursor_y].len() {
+                cursor_y += 1;
+                cursor_x = 0;
+            }
+        }
+        ARROW_UP_KEY => {
+            cursor_y = cursor_y.saturating_sub(1);
+        }
+        ARROW_DOWN_KEY => {
+            if cursor_y < editor.get_text_num_rows() {
+                cursor_y += 1;
+            }
+        }
         _ => {}
     }
+
+    // Snap to end of line
+    let current_row_len = if cursor_y < editor.get_text_num_rows() {
+        editor.rows[cursor_y].len()
+    } else {
+        0
+    };
+
+    if cursor_x > current_row_len {
+        cursor_x = current_row_len;
+    }
+
+    // Write changes
+    editor.set_cursor_x(cursor_x);
+    editor.set_cursor_y(cursor_y);
 }
 
 /** Returns true if should continue */
