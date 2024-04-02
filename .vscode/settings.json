@@ -11,11 +11,13 @@
     "ISTRIP",
     "IXON",
     "lflag",
+    "libc",
     "oflag",
     "OPOST",
     "TCSANOW",
     "tcsetattr",
     "termios",
+    "thiserror",
     "VMIN",
     "VTIME"
   ]
