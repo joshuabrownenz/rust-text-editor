@@ -11,6 +11,45 @@ use termios::*;
 mod error;
 pub mod prelude;
 
+/*** Constants ***/
+const KILO_VERSION: &str = "0.0.1";
+const KILO_TAB_STOP: usize = 8;
+
+struct EditorRow {
+    chars: String,
+    render: String,
+}
+
+impl EditorRow {
+    pub fn new(chars: String) -> Self {
+        EditorRow {
+            chars,
+            render: String::new(),
+        }
+    }
+
+    pub fn update_render(&mut self) {
+        // Render tabs
+        let mut tabs = 0;
+        for c in self.chars.chars() {
+            if c == '\t' {
+                tabs += 1;
+            }
+        }
+
+        let mut render = String::with_capacity(self.chars.len() + tabs * (KILO_TAB_STOP - 1));
+        for c in self.chars.chars() {
+            if c == '\t' {
+                render.push_str(&" ".repeat(KILO_TAB_STOP));
+            } else {
+                render.push(c);
+            }
+        }
+
+        self.render = render;
+    }
+}
+
 #[derive(Default)]
 struct EditorConfigData {
     cursor_x: usize,
@@ -19,13 +58,15 @@ struct EditorConfigData {
     column_offset: usize,
     editor_num_rows: usize,
     editor_num_columns: usize,
-    rows: Vec<String>,
+    rows: Vec<EditorRow>,
     original_terminal: Option<Termios>,
 }
 
 impl EditorConfigData {
     pub fn append_row(&mut self, row: String) {
-        self.rows.push(row);
+        let mut editor_row = EditorRow::new(row);
+        editor_row.update_render();
+        self.rows.push(editor_row);
     }
 
     // SETTERs
@@ -117,7 +158,7 @@ impl EditorConfig {
         self.data.write().unwrap().set_cursor_y(cursor_y)
     }
 
-    pub fn set_rows(&self, rows: Vec<String>) {
+    pub fn set_rows(&self, rows: Vec<EditorRow>) {
         self.data.write().unwrap().rows = rows
     }
 
@@ -188,9 +229,6 @@ impl AppendBuffer {
 }
 
 /*** Data ***/
-
-/*** Constants ***/
-const KILO_VERSION: &str = "0.0.1";
 
 // Editor Keys
 const ARROW_LEFT_KEY: usize = 1000;
@@ -359,7 +397,7 @@ fn editor_draw_rows(buffer: &mut AppendBuffer) {
                 buffer.push("~");
             }
         } else {
-            let mut row: &str = &editor.rows[file_row];
+            let mut row: &str = &editor.rows[file_row].render;
             // Apply column offset
             if (column_offset as usize) < row.len() {
                 row = &row[column_offset..];
@@ -520,13 +558,13 @@ fn editor_move_cursor(key: usize) {
                 cursor_x -= 1;
             } else if cursor_y > 0 {
                 cursor_y -= 1;
-                cursor_x = editor.rows[cursor_y].len();
+                cursor_x = editor.rows[cursor_y].render.len();
             }
         }
         ARROW_RIGHT_KEY => {
-            if on_row && cursor_x < editor.rows[cursor_y].len() {
+            if on_row && cursor_x < editor.rows[cursor_y].render.len() {
                 cursor_x += 1;
-            } else if on_row && cursor_x == editor.rows[cursor_y].len() {
+            } else if on_row && cursor_x == editor.rows[cursor_y].render.len() {
                 cursor_y += 1;
                 cursor_x = 0;
             }
@@ -544,7 +582,7 @@ fn editor_move_cursor(key: usize) {
 
     // Snap to end of line
     let current_row_len = if cursor_y < editor.get_text_num_rows() {
-        editor.rows[cursor_y].len()
+        editor.rows[cursor_y].render.len()
     } else {
         0
     };
