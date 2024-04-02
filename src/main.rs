@@ -1,6 +1,7 @@
 use lazy_static::lazy_static;
 use std::{
     io::{self, ErrorKind, Read, Write},
+    isize,
     os::fd::AsRawFd,
     process,
     sync::{Arc, RwLock},
@@ -89,6 +90,17 @@ impl AppendBuffer {
 /*** Constants ***/
 const KILO_VERSION: &str = "0.0.1";
 
+// Editor Keys
+const ARROW_LEFT_KEY: usize = 1000;
+const ARROW_RIGHT_KEY: usize = 1001;
+const ARROW_UP_KEY: usize = 1002;
+const ARROW_DOWN_KEY: usize = 1003;
+const PAGE_UP_KEY: usize = 1004;
+const PAGE_DOWN_KEY: usize = 1005;
+const HOME_KEY: usize = 1006;
+const END_KEY: usize = 1007;
+const DELETE_KEY: usize = 1008;
+
 /*** Static Variables ***/
 lazy_static! {
     static ref EDITOR: Arc<EditorConfig> = Arc::new(EditorConfig {
@@ -150,8 +162,8 @@ fn get_window_size() {
     }
 }
 
-fn ctrl_char(k: char) -> char {
-    ((k as u8) & 0x1f) as char
+fn ctrl_char(k: char) -> usize {
+    ((k as u8) & 0x1f) as usize
 }
 
 /*** Output ***/
@@ -234,20 +246,81 @@ fn editor_refresh_screen() {
 }
 
 /*** Input ***/
-fn editor_read_key() -> char {
+// TODO: Refactor reading into buffer
+fn editor_read_key() -> usize {
     let mut buf: [u8; 1] = [0; 1];
 
-    let read_ok: Result<(), io::Error> = io::stdin().lock().read_exact(&mut buf);
-    if let Err(error) = read_ok {
+    if let Err(error) = io::stdin().lock().read_exact(&mut buf) {
         if error.kind() != ErrorKind::UnexpectedEof {
             die(&format!("Read error: {}", error));
         }
     }
 
-    buf[0] as char
+    // Read escape squences
+    if buf[0] as char == '\x1b' {
+        let mut seq: [u8; 3] = [0; 3];
+
+        // Read the next two characters (if no response assume escape key)
+        if let Err(error) = io::stdin().lock().read_exact(&mut seq[..1]) {
+            if error.kind() == ErrorKind::UnexpectedEof {
+                return '\x1b' as usize; // Escape key
+            }
+            die(&format!("Read error: {}", error));
+        }
+        if let Err(error) = io::stdin().lock().read_exact(&mut seq[1..2]) {
+            if error.kind() == ErrorKind::UnexpectedEof {
+                return '\x1b' as usize; // Escape key
+            }
+            die(&format!("Read error: {}", error));
+        }
+
+        if seq[0] as char == '[' {
+            if seq[1] as char > '0' && seq[1] as char <= '9' {
+                if let Err(error) = io::stdin().lock().read_exact(&mut seq[2..3]) {
+                    if error.kind() == ErrorKind::UnexpectedEof {
+                        return '\x1b' as usize; // Escape key
+                    }
+                    die(&format!("Read error: {}", error));
+                }
+
+                if seq[2] as char == '~' {
+                    match seq[1] as char {
+                        '1' => return HOME_KEY,
+                        '3' => return DELETE_KEY,
+                        '4' => return END_KEY,
+                        '5' => return PAGE_UP_KEY,
+                        '6' => return PAGE_DOWN_KEY,
+                        '7' => return HOME_KEY,
+                        '8' => return END_KEY,
+                        _ => {}
+                    }
+                }
+            } else {
+                match seq[1] as char {
+                    'A' => return ARROW_UP_KEY,
+                    'B' => return ARROW_DOWN_KEY,
+                    'C' => return ARROW_RIGHT_KEY,
+                    'D' => return ARROW_LEFT_KEY,
+                    'H' => return HOME_KEY,
+                    'F' => return END_KEY,
+                    _ => {}
+                }
+            }
+        } else if seq[0] as char == 'O' {
+            match seq[1] as char {
+                'H' => return HOME_KEY,
+                'F' => return END_KEY,
+                _ => {}
+            }
+        }
+
+        return '\x1b' as usize;
+    }
+
+    buf[0] as usize
 }
 
-fn editor_move_cursor(key: u8) {
+fn editor_move_cursor(key: usize) {
     fn move_cursor(offset_x: isize, offset_y: isize) {
         let (cursor_x, cursor_y) = EDITOR.get_cursor();
         let cursor_x = cursor_x as isize + offset_x;
@@ -259,32 +332,48 @@ fn editor_move_cursor(key: u8) {
         if cursor_x >= 0 && cursor_x < num_columns as isize {
             EDITOR.set_cursor_x(cursor_x as usize);
         }
-        
+
         if cursor_y >= 0 && cursor_y < num_rows as isize {
             EDITOR.set_cursor_y(cursor_y as usize);
         }
     }
 
-    match key as char {
-        'h' => move_cursor(-1, 0),
-        'l' => move_cursor(1, 0),
-        'k' => move_cursor(0, -1),
-        'j' => move_cursor(0, 1),
+    match key {
+        ARROW_LEFT_KEY => move_cursor(-1, 0),
+        ARROW_RIGHT_KEY => move_cursor(1, 0),
+        ARROW_UP_KEY => move_cursor(0, -1),
+        ARROW_DOWN_KEY => move_cursor(0, 1),
         _ => {}
     }
 }
 
 /** Returns true if should continue */
 fn editor_process_keypress() {
-    let c: char = editor_read_key();
+    let key: usize = editor_read_key();
 
     // Exit on q
-    match c {
-        _ if c == ctrl_char('q') => {
+    match key {
+        _ if key == ctrl_char('q') => {
             cleanup();
             process::exit(0);
         }
-        'h' | 'j' | 'k' | 'l' => editor_move_cursor(c as u8),
+        ARROW_LEFT_KEY | ARROW_RIGHT_KEY | ARROW_UP_KEY | ARROW_DOWN_KEY => editor_move_cursor(key),
+        PAGE_DOWN_KEY | PAGE_UP_KEY => {
+            let mut times = EDITOR.get_num_rows() as isize;
+            while times > 0 {
+                editor_move_cursor(if key == PAGE_UP_KEY {
+                    ARROW_UP_KEY
+                } else {
+                    ARROW_DOWN_KEY
+                });
+                times -= 1;
+            }
+        }
+        HOME_KEY => EDITOR.set_cursor_x(0),
+        END_KEY => {
+            let num_columns = EDITOR.get_num_columns();
+            EDITOR.set_cursor_x(num_columns - 1);
+        }
         _ => {}
     };
 }
