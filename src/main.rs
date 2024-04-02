@@ -456,7 +456,11 @@ impl Editor {
 
     fn editor_save(&mut self) {
         if self.filename.is_none() {
-            self.editor_set_status_message("No file open to save");
+            self.filename = self.editor_prompt("Save as: %s (ESC to cancel)");
+            if self.filename.is_none() {
+                self.editor_set_status_message("Save aborted");
+                return;
+            }
         }
 
         let buf = self.editor_rows_to_string();
@@ -638,6 +642,34 @@ impl Editor {
         }
 
         buf[0] as usize
+    }
+
+    fn editor_prompt(&mut self, prompt: &str) -> Option<String> {
+        let mut buffer = AppendBuffer::new();
+
+        loop {
+            self.editor_set_status_message(&prompt.replace("%s", &buffer.buf));
+            self.editor_refresh_screen();
+
+            let key = self.editor_read_key();
+
+            if key == '\x1b' as usize {
+                self.editor_set_status_message("");
+                return None;
+            } else if key == CARRIAGE_RETURN_KEY {
+                self.editor_set_status_message("");
+
+                if buffer.buf.is_empty() {
+                    return None;
+                } else {
+                    return Some(buffer.buf);
+                }
+            } else if key == BACKSPACE_KEY || key == Editor::ctrl_char('h')  || key == DELETE_KEY {
+                buffer.buf.pop();
+            } else if key < 127 && (key as u8).is_ascii_graphic() || (key as u8).is_ascii_whitespace() {
+                buffer.buf.push(key as u8 as char);
+            }
+        }
     }
 
     fn editor_move_cursor(&mut self, key: usize) {
