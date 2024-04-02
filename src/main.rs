@@ -68,6 +68,9 @@ impl AppendBuffer {
     }
 }
 
+/*** Constants ***/
+const KILO_VERSION: &str = "0.0.1";
+
 /*** Static Variables ***/
 lazy_static! {
     static ref EDITOR: Arc<EditorConfig> = Arc::new(EditorConfig {
@@ -155,9 +158,29 @@ fn init_editor() {
 /** Requires a flush to be guaranteed on the screen */
 fn editor_draw_rows(buffer: &mut AppendBuffer) {
     let num_rows = EDITOR.get_num_rows();
+    let num_columns = EDITOR.get_num_columns();
     for y in 0..num_rows {
-        // buffer.push("~");
-        buffer.push(&format!("{}", y));
+        if y == num_rows / 3 {
+            let mut welcome_msg = format!("Kilo editor -- version {}", KILO_VERSION);
+            if welcome_msg.len() > num_columns {
+                welcome_msg = welcome_msg[..num_columns].to_string();
+            }
+            let mut padding = (num_columns - welcome_msg.len()) / 2;
+            if padding > 0 {
+                buffer.push("~");
+                padding -= 1;
+            }
+
+            while (padding > 0) {
+                buffer.push(" ");
+                padding -= 1;
+            }
+
+            buffer.push(&welcome_msg);
+        } else {
+            buffer.push("~");
+        }
+
         buffer.push("\x1b[K");
         if y < num_rows - 1 {
             buffer.push("\r\n");
