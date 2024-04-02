@@ -12,6 +12,8 @@ pub mod prelude;
 
 #[derive(Default)]
 struct EditorData {
+    cursor_x: usize,
+    cursor_y: usize,
     num_rows: usize,
     num_columns: usize,
     original_terminal: Option<Termios>,
@@ -23,6 +25,7 @@ struct EditorConfig {
 }
 
 impl EditorConfig {
+    // SETTERs
     pub fn set_original_terminal(&self, original_terminal: Termios) {
         let mut data = self.data.write().unwrap();
         data.original_terminal = Some(original_terminal);
@@ -32,6 +35,16 @@ impl EditorConfig {
         let mut data = self.data.write().unwrap();
         data.num_rows = num_rows;
         data.num_columns = num_columns;
+    }
+
+    pub fn set_cursor_x(&self, cursor_x: usize) {
+        let mut data = self.data.write().unwrap();
+        data.cursor_x = cursor_x;
+    }
+
+    pub fn set_cursor_y(&self, cursor_y: usize) {
+        let mut data = self.data.write().unwrap();
+        data.cursor_y = cursor_y;
     }
 
     // GETTERs
@@ -45,6 +58,11 @@ impl EditorConfig {
 
     pub fn get_original_terminal(&self) -> Option<Termios> {
         self.data.read().unwrap().original_terminal
+    }
+
+    pub fn get_cursor(&self) -> (usize, usize) {
+        let data = self.data.read().unwrap();
+        (data.cursor_x, data.cursor_y)
     }
 }
 
@@ -75,6 +93,8 @@ const KILO_VERSION: &str = "0.0.1";
 lazy_static! {
     static ref EDITOR: Arc<EditorConfig> = Arc::new(EditorConfig {
         data: RwLock::new(EditorData {
+            cursor_x: 0,
+            cursor_y: 0,
             num_rows: 0,
             num_columns: 0,
             original_terminal: None,
@@ -130,8 +150,8 @@ fn get_window_size() {
     }
 }
 
-fn ctrl_char(k: char) -> u8 {
-    (k as u8) & 0x1f
+fn ctrl_char(k: char) -> char {
+    ((k as u8) & 0x1f) as char
 }
 
 /*** Output ***/
@@ -152,8 +172,12 @@ fn flush_stdout() {
 }
 
 fn init_editor() {
+    EDITOR.set_cursor_x(0);
+    EDITOR.set_cursor_y(0);
     get_window_size();
 }
+
+/*** Editor ***/
 
 /** Requires a flush to be guaranteed on the screen */
 fn editor_draw_rows(buffer: &mut AppendBuffer) {
@@ -199,8 +223,9 @@ fn editor_refresh_screen() {
 
     editor_draw_rows(&mut buffer);
 
-    // Position at the top of the screen
-    buffer.push("\x1b[H");
+    // Position cursor at cursor_x and cursor_y
+    let (cursor_x, cursor_y) = EDITOR.get_cursor();
+    buffer.push(&format!("\x1b[{};{}H", cursor_y + 1, cursor_x + 1));
 
     // Show cursor
     buffer.push("\x1b[?25h");
@@ -209,7 +234,7 @@ fn editor_refresh_screen() {
 }
 
 /*** Input ***/
-fn editor_read_key() -> u8 {
+fn editor_read_key() -> char {
     let mut buf: [u8; 1] = [0; 1];
 
     let read_ok: Result<(), io::Error> = io::stdin().lock().read_exact(&mut buf);
@@ -219,12 +244,39 @@ fn editor_read_key() -> u8 {
         }
     }
 
-    buf[0]
+    buf[0] as char
+}
+
+fn editor_move_cursor(key: u8) {
+    fn move_cursor(offset_x: isize, offset_y: isize) {
+        let (cursor_x, cursor_y) = EDITOR.get_cursor();
+        let cursor_x = cursor_x as isize + offset_x;
+        let cursor_y = cursor_y as isize + offset_y;
+
+        let num_rows = EDITOR.get_num_rows();
+        let num_columns = EDITOR.get_num_columns();
+
+        if cursor_x >= 0 && cursor_x < num_columns as isize {
+            EDITOR.set_cursor_x(cursor_x as usize);
+        }
+        
+        if cursor_y >= 0 && cursor_y < num_rows as isize {
+            EDITOR.set_cursor_y(cursor_y as usize);
+        }
+    }
+
+    match key as char {
+        'h' => move_cursor(-1, 0),
+        'l' => move_cursor(1, 0),
+        'k' => move_cursor(0, -1),
+        'j' => move_cursor(0, 1),
+        _ => {}
+    }
 }
 
 /** Returns true if should continue */
 fn editor_process_keypress() {
-    let c: u8 = editor_read_key();
+    let c: char = editor_read_key();
 
     // Exit on q
     match c {
@@ -232,6 +284,7 @@ fn editor_process_keypress() {
             cleanup();
             process::exit(0);
         }
+        'h' | 'j' | 'k' | 'l' => editor_move_cursor(c as u8),
         _ => {}
     };
 }
