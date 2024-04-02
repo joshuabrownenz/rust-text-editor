@@ -3,6 +3,7 @@ use std::{
     isize,
     os::fd::AsRawFd,
     process,
+    time::{Instant, SystemTime},
 };
 use termios::*;
 
@@ -12,6 +13,7 @@ pub mod prelude;
 /*** Constants ***/
 const KILO_VERSION: &str = "0.0.1";
 const KILO_TAB_STOP: usize = 8;
+const KILO_MESSAGE_BAR_HEIGHT: usize = 2;
 
 // Editor Keys
 const ARROW_LEFT_KEY: usize = 1000;
@@ -37,6 +39,10 @@ impl EditorRow {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.chars.len()
+    }
+
     pub fn update_render(&mut self) {
         // Render tabs
         let mut tabs = 0;
@@ -47,15 +53,34 @@ impl EditorRow {
         }
 
         let mut render = String::with_capacity(self.chars.len() + tabs * (KILO_TAB_STOP - 1));
+        let mut index = 0;
         for c in self.chars.chars() {
             if c == '\t' {
-                render.push_str(&" ".repeat(KILO_TAB_STOP));
+                render.push(' ');
+                index += 1;
+                while index % KILO_TAB_STOP != 0 {
+                    render.push(' ');
+                    index += 1;
+                }
             } else {
                 render.push(c);
+                index += 1;
             }
         }
 
         self.render = render;
+    }
+
+    pub fn cursor_x_to_render_cursor_x(&self, cursor_x: usize) -> usize {
+        let mut render_cursor_x = 0;
+        for c in self.chars.chars().take(cursor_x) {
+            if c == '\t' {
+                render_cursor_x += KILO_TAB_STOP - 1 - (render_cursor_x % KILO_TAB_STOP);
+            }
+            render_cursor_x += 1;
+        }
+
+        render_cursor_x
     }
 }
 
@@ -83,11 +108,15 @@ impl AppendBuffer {
 struct Editor {
     cursor_x: usize,
     cursor_y: usize,
+    render_cursor_x: usize,
     row_offset: usize,
     column_offset: usize,
-    editor_num_rows: usize,
-    editor_num_columns: usize,
+    screen_num_rows: usize,
+    screen_num_columns: usize,
     rows: Vec<EditorRow>,
+    filename: Option<String>,
+    status_message: Option<String>,
+    status_message_time: Instant,
     original_terminal: Option<Termios>,
 }
 
@@ -96,15 +125,19 @@ impl Editor {
         let mut editor = Self {
             cursor_x: 0,
             cursor_y: 0,
+            render_cursor_x: 0,
             row_offset: 0,
             column_offset: 0,
-            editor_num_rows: 0,
-            editor_num_columns: 0,
+            screen_num_rows: 0,
+            screen_num_columns: 0,
             rows: vec![],
+            filename: None,
+            status_message: None,
+            status_message_time: Instant::now(),
             original_terminal: None,
         };
 
-        editor.get_window_size();
+        editor.get_dimensions();
 
         editor
     }
@@ -119,9 +152,13 @@ impl Editor {
         self.original_terminal = Some(original_terminal);
     }
 
-    pub fn set_dimensions(&mut self, num_rows: usize, num_columns: usize) {
-        self.editor_num_rows = num_rows;
-        self.editor_num_columns = num_columns;
+    pub fn get_dimensions(&mut self) {
+        if let Some((num_columns, num_rows)) = term_size::dimensions() {
+            self.screen_num_rows = num_rows - KILO_MESSAGE_BAR_HEIGHT;
+            self.screen_num_columns = num_columns;
+        } else {
+            self.die("get dimensions");
+        }
     }
 
     pub fn get_text_num_rows(&self) -> usize {
@@ -168,14 +205,6 @@ impl Editor {
         process::exit(1);
     }
 
-    fn get_window_size(&mut self) {
-        if let Some((w, h)) = term_size::dimensions() {
-            self.set_dimensions(h, w);
-        } else {
-            self.die("get dimensions");
-        }
-    }
-
     fn ctrl_char(k: char) -> usize {
         ((k as u8) & 0x1f) as usize
     }
@@ -197,31 +226,82 @@ impl Editor {
         }
     }
 
+    fn editor_draw_status_bar(&self, buffer: &mut AppendBuffer) {
+        buffer.push("\x1b[7m");
+
+        let mut truncated_filename = self.filename.as_deref().unwrap_or("[No Name]");
+        if truncated_filename.len() > 20 {
+            truncated_filename = &truncated_filename[..20];
+        }
+
+        let mut status = format!(
+            "{} - {} lines",
+            truncated_filename,
+            self.get_text_num_rows()
+        );
+
+        let r_status = format!("{}/{}", self.cursor_y + 1, self.get_text_num_rows());
+
+        if status.len() > self.screen_num_columns {
+            status = status[..self.screen_num_columns].to_string();
+        }
+        while status.len() < self.screen_num_columns {
+            if self.screen_num_columns - status.len() == r_status.len() {
+                status.push_str(&r_status);
+                break;
+            }
+            status.push(' ');
+        }
+
+        buffer.push(&status);
+
+        buffer.push("\x1b[m");
+        buffer.push("\r\n");
+    }
+
+    fn editor_draw_message_bar(&self, buffer: &mut AppendBuffer) {
+        buffer.push("\x1b[K");
+        let mut msg = self.status_message.as_deref().unwrap_or("");
+        if msg.len() > self.screen_num_columns {
+            msg = &msg[..self.screen_num_columns];
+        }
+
+        if (Instant::now() - self.status_message_time).as_secs() < 5 {
+            buffer.push(msg);
+        }
+    }
+
     /*** Editor ***/
     fn editor_scroll(&mut self) {
+        self.render_cursor_x = 0;
+        if self.cursor_y < self.get_text_num_rows() {
+            self.render_cursor_x =
+                self.rows[self.cursor_y].cursor_x_to_render_cursor_x(self.cursor_x);
+        }
+
         // Row offset
         if self.cursor_y < self.row_offset {
             self.row_offset = self.cursor_y;
         }
 
-        if self.cursor_y >= self.row_offset + self.editor_num_rows {
-            self.row_offset = self.cursor_y - self.editor_num_rows + 1;
+        if self.cursor_y >= self.row_offset + self.screen_num_rows {
+            self.row_offset = self.cursor_y - self.screen_num_rows + 1;
         }
 
         // Column offset
-        if self.cursor_x < self.column_offset {
-            self.column_offset = self.cursor_x;
+        if self.render_cursor_x < self.column_offset {
+            self.column_offset = self.render_cursor_x;
         }
 
-        if self.cursor_x >= self.column_offset + self.editor_num_columns {
-            self.column_offset = self.cursor_x - self.editor_num_columns + 1;
+        if self.render_cursor_x >= self.column_offset + self.screen_num_columns {
+            self.column_offset = self.render_cursor_x - self.screen_num_columns + 1;
         }
     }
 
     /** Requires a flush to be guaranteed on the screen */
     fn editor_draw_rows(&self, buffer: &mut AppendBuffer) {
-        let editor_num_rows = self.editor_num_rows;
-        let editor_num_columns = self.editor_num_columns;
+        let editor_num_rows = self.screen_num_rows;
+        let editor_num_columns = self.screen_num_columns;
 
         let row_offset = self.row_offset;
         let column_offset = self.column_offset;
@@ -268,9 +348,7 @@ impl Editor {
             }
 
             buffer.push("\x1b[K");
-            if y < editor_num_rows - 1 {
-                buffer.push("\r\n");
-            }
+            buffer.push("\r\n");
         }
     }
 
@@ -286,22 +364,25 @@ impl Editor {
         buffer.push("\x1b[H");
 
         self.editor_draw_rows(&mut buffer);
+        self.editor_draw_status_bar(&mut buffer);
+        self.editor_draw_message_bar(&mut buffer);
 
         // Position cursor at cursor_x and cursor_y
-        let cursor_x = self.cursor_x;
-        let cursor_y = self.cursor_y;
-        let row_offset = self.row_offset;
-        let column_offset = self.column_offset;
         buffer.push(&format!(
             "\x1b[{};{}H",
-            (cursor_y - row_offset) + 1,
-            (cursor_x - column_offset) + 1
+            (self.cursor_y - self.row_offset) + 1,
+            (self.render_cursor_x - self.column_offset) + 1
         ));
 
         // Show cursor
         buffer.push("\x1b[?25h");
 
         buffer.write(self);
+    }
+
+    fn editor_set_status_message(&mut self, message: &str) {
+        self.status_message = Some(message.to_string());
+        self.status_message_time = Instant::now();
     }
 
     /*** File I/O ***/
@@ -326,6 +407,8 @@ impl Editor {
             // println!("Append row: {} (len: {})", line, length);
             self.append_row(line.to_string());
         }
+
+        self.filename = Some(filename.to_string());
     }
 
     /*** Input ***/
@@ -333,10 +416,15 @@ impl Editor {
     fn editor_read_key(&self) -> usize {
         let mut buf: [u8; 1] = [0; 1];
 
-        if let Err(error) = io::stdin().lock().read_exact(&mut buf) {
+        while if let Err(error) = io::stdin().lock().read_exact(&mut buf) {
             if error.kind() != ErrorKind::UnexpectedEof {
                 self.die(&format!("Read error: {}", error));
             }
+            true
+        } else {
+            false // Break loop
+        } {
+            continue;
         }
 
         // Read escape sequences
@@ -459,7 +547,16 @@ impl Editor {
                 self.editor_move_cursor(key)
             }
             PAGE_DOWN_KEY | PAGE_UP_KEY => {
-                let mut times = self.editor_num_rows as isize;
+                if key == PAGE_UP_KEY {
+                    self.cursor_y = self.row_offset;
+                } else if key == PAGE_DOWN_KEY {
+                    self.cursor_y = self.row_offset + self.screen_num_rows - 1;
+                    if self.cursor_y > self.get_text_num_rows() {
+                        self.cursor_y = self.get_text_num_rows();
+                    }
+                }
+
+                let mut times = self.screen_num_rows;
                 while times > 0 {
                     self.editor_move_cursor(if key == PAGE_UP_KEY {
                         ARROW_UP_KEY
@@ -471,7 +568,9 @@ impl Editor {
             }
             HOME_KEY => self.cursor_x = 0,
             END_KEY => {
-                self.cursor_x = self.editor_num_columns - 1;
+                if self.cursor_y < self.get_text_num_rows() {
+                    self.cursor_x = self.rows[self.cursor_y].len();
+                }
             }
             _ => {}
         };
@@ -487,6 +586,8 @@ fn main() {
     if args.len() > 1 {
         editor.editor_open(&args[1]);
     }
+
+    editor.editor_set_status_message("HELP: Ctrl-Q = quit");
 
     loop {
         editor.editor_refresh_screen();
