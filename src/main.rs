@@ -1,9 +1,8 @@
 use std::{
     io::{self, ErrorKind, Read, Write},
-    isize,
     os::fd::AsRawFd,
     process,
-    time::{Instant, SystemTime},
+    time::Instant,
 };
 use termios::*;
 
@@ -16,6 +15,8 @@ const KILO_TAB_STOP: usize = 8;
 const KILO_MESSAGE_BAR_HEIGHT: usize = 2;
 
 // Editor Keys
+const CARRIAGE_RETURN: usize = 13;
+const BACKSPACE: usize = 127;
 const ARROW_LEFT_KEY: usize = 1000;
 const ARROW_RIGHT_KEY: usize = 1001;
 const ARROW_UP_KEY: usize = 1002;
@@ -25,6 +26,7 @@ const PAGE_DOWN_KEY: usize = 1005;
 const HOME_KEY: usize = 1006;
 const END_KEY: usize = 1007;
 const DELETE_KEY: usize = 1008;
+const ESCAPE_KEY: usize = '\x1b' as usize;
 
 struct EditorRow {
     chars: String,
@@ -81,6 +83,11 @@ impl EditorRow {
         }
 
         render_cursor_x
+    }
+
+    pub fn insert_char(&mut self, at: usize, c: char) {
+        self.chars.insert(at, c);
+        self.update_render();
     }
 }
 
@@ -411,6 +418,17 @@ impl Editor {
         self.filename = Some(filename.to_string());
     }
 
+    /*** Editor operations ***/
+    fn editor_insert_char(&mut self, c: char) {
+        if self.cursor_y == self.get_text_num_rows() {
+            self.append_row(String::new());
+        }
+
+        let row = &mut self.rows[self.cursor_y];
+        row.insert_char(self.cursor_x, c);
+        self.cursor_x += 1;
+    }
+
     /*** Input ***/
     // TODO: Refactor reading into buffer
     fn editor_read_key(&self) -> usize {
@@ -428,19 +446,19 @@ impl Editor {
         }
 
         // Read escape sequences
-        if buf[0] as char == '\x1b' {
+        if buf[0] as usize == ESCAPE_KEY {
             let mut seq: [u8; 3] = [0; 3];
 
             // Read the next two characters (if no response assume escape key)
             if let Err(error) = io::stdin().lock().read_exact(&mut seq[..1]) {
                 if error.kind() == ErrorKind::UnexpectedEof {
-                    return '\x1b' as usize; // Escape key
+                    return ESCAPE_KEY;
                 }
                 self.die(&format!("Read error: {}", error));
             }
             if let Err(error) = io::stdin().lock().read_exact(&mut seq[1..2]) {
                 if error.kind() == ErrorKind::UnexpectedEof {
-                    return '\x1b' as usize; // Escape key
+                    return ESCAPE_KEY;
                 }
                 self.die(&format!("Read error: {}", error));
             }
@@ -449,7 +467,7 @@ impl Editor {
                 if seq[1] as char > '0' && seq[1] as char <= '9' {
                     if let Err(error) = io::stdin().lock().read_exact(&mut seq[2..3]) {
                         if error.kind() == ErrorKind::UnexpectedEof {
-                            return '\x1b' as usize; // Escape key
+                            return ESCAPE_KEY;
                         }
                         self.die(&format!("Read error: {}", error));
                     }
@@ -485,7 +503,7 @@ impl Editor {
                 }
             }
 
-            return '\x1b' as usize;
+            return ESCAPE_KEY;
         }
 
         buf[0] as usize
@@ -543,6 +561,9 @@ impl Editor {
                 self.cleanup();
                 process::exit(0);
             }
+            CARRIAGE_RETURN => {
+                // TODO:
+            }
             ARROW_LEFT_KEY | ARROW_RIGHT_KEY | ARROW_UP_KEY | ARROW_DOWN_KEY => {
                 self.editor_move_cursor(key)
             }
@@ -572,7 +593,18 @@ impl Editor {
                     self.cursor_x = self.rows[self.cursor_y].len();
                 }
             }
-            _ => {}
+            _ if key == Editor::ctrl_char('h') | BACKSPACE | DELETE_KEY => {
+                // TODO:
+            }
+            _ if key == Editor::ctrl_char('l') | ESCAPE_KEY => {
+                // Do nothing
+            }
+            _ => {
+                if (key < 128 && (key as u8).is_ascii()) || key == '\t' as usize {
+                    // Insert character
+                    self.editor_insert_char(key as u8 as char);
+                }
+            }
         };
     }
 }
