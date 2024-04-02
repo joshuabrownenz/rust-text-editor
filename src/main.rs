@@ -4,7 +4,7 @@ use std::{
     isize,
     os::fd::AsRawFd,
     process,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockReadGuard},
 };
 use termios::*;
 
@@ -12,58 +12,120 @@ mod error;
 pub mod prelude;
 
 #[derive(Default)]
-struct EditorData {
+struct EditorConfigData {
     cursor_x: usize,
     cursor_y: usize,
-    num_rows: usize,
-    num_columns: usize,
+    editor_num_rows: usize,
+    editor_num_columns: usize,
+    rows: Vec<String>,
     original_terminal: Option<Termios>,
+}
+
+impl EditorConfigData {
+    pub fn append_row(&mut self, row: String) {
+        self.rows.push(row);
+    }
+
+    // SETTERs
+    pub fn set_original_terminal(&mut self, original_terminal: Termios) {
+        self.original_terminal = Some(original_terminal);
+    }
+
+    pub fn set_dimensions(&mut self, num_rows: usize, num_columns: usize) {
+        self.editor_num_rows = num_rows;
+        self.editor_num_columns = num_columns;
+    }
+
+    pub fn set_cursor_x(&mut self, cursor_x: usize) {
+        self.cursor_x = cursor_x;
+    }
+
+    pub fn set_cursor_y(&mut self, cursor_y: usize) {
+        self.cursor_y = cursor_y;
+    }
+
+    // GETTERs
+    pub fn get_editor_num_rows(&self) -> usize {
+        self.editor_num_rows
+    }
+
+    pub fn get_editor_num_columns(&self) -> usize {
+        self.editor_num_columns
+    }
+
+    pub fn get_original_terminal(&self) -> Option<Termios> {
+        self.original_terminal
+    }
+
+    pub fn get_cursor(&self) -> (usize, usize) {
+        (self.cursor_x, self.cursor_y)
+    }
+
+    pub fn get_text_num_rows(&self) -> usize {
+        self.rows.len()
+    }
 }
 
 /*** EditorConfig ***/
 struct EditorConfig {
-    data: RwLock<EditorData>,
+    data: RwLock<EditorConfigData>,
 }
 
 impl EditorConfig {
+    pub fn append_row(&self, row: String) {
+        self.data.write().unwrap().append_row(row)
+    }
+
     // SETTERs
     pub fn set_original_terminal(&self, original_terminal: Termios) {
-        let mut data = self.data.write().unwrap();
-        data.original_terminal = Some(original_terminal);
+        self.data
+            .write()
+            .unwrap()
+            .set_original_terminal(original_terminal);
     }
 
     pub fn set_dimensions(&self, num_rows: usize, num_columns: usize) {
-        let mut data = self.data.write().unwrap();
-        data.num_rows = num_rows;
-        data.num_columns = num_columns;
+        self.data
+            .write()
+            .unwrap()
+            .set_dimensions(num_rows, num_columns)
     }
 
     pub fn set_cursor_x(&self, cursor_x: usize) {
-        let mut data = self.data.write().unwrap();
-        data.cursor_x = cursor_x;
+        self.data.write().unwrap().set_cursor_x(cursor_x)
     }
 
     pub fn set_cursor_y(&self, cursor_y: usize) {
-        let mut data = self.data.write().unwrap();
-        data.cursor_y = cursor_y;
+        self.data.write().unwrap().set_cursor_y(cursor_y)
+    }
+
+    pub fn set_rows(&self, rows: Vec<String>) {
+        self.data.write().unwrap().rows = rows
     }
 
     // GETTERs
-    pub fn get_num_rows(&self) -> usize {
-        self.data.read().unwrap().num_rows
+    pub fn get_editor_num_rows(&self) -> usize {
+        self.data.read().unwrap().get_editor_num_rows()
     }
 
-    pub fn get_num_columns(&self) -> usize {
-        self.data.read().unwrap().num_columns
+    pub fn get_editor_num_columns(&self) -> usize {
+        self.data.read().unwrap().get_editor_num_columns()
     }
 
     pub fn get_original_terminal(&self) -> Option<Termios> {
-        self.data.read().unwrap().original_terminal
+        self.data.read().unwrap().get_original_terminal()
     }
 
     pub fn get_cursor(&self) -> (usize, usize) {
-        let data = self.data.read().unwrap();
-        (data.cursor_x, data.cursor_y)
+        self.data.read().unwrap().get_cursor()
+    }
+
+    pub fn acquire_read_lock(&self) -> RwLockReadGuard<EditorConfigData> {
+        self.data.read().unwrap()
+    }
+
+    pub fn get_text_num_rows(&self) -> usize {
+        self.data.read().unwrap().get_text_num_rows()
     }
 }
 
@@ -87,6 +149,8 @@ impl AppendBuffer {
     }
 }
 
+/*** Data ***/
+
 /*** Constants ***/
 const KILO_VERSION: &str = "0.0.1";
 
@@ -104,11 +168,12 @@ const DELETE_KEY: usize = 1008;
 /*** Static Variables ***/
 lazy_static! {
     static ref EDITOR: Arc<EditorConfig> = Arc::new(EditorConfig {
-        data: RwLock::new(EditorData {
+        data: RwLock::new(EditorConfigData {
             cursor_x: 0,
             cursor_y: 0,
-            num_rows: 0,
-            num_columns: 0,
+            editor_num_rows: 0,
+            editor_num_columns: 0,
+            rows: vec![],
             original_terminal: None,
         }),
     });
@@ -193,32 +258,44 @@ fn init_editor() {
 
 /** Requires a flush to be guaranteed on the screen */
 fn editor_draw_rows(buffer: &mut AppendBuffer) {
-    let num_rows = EDITOR.get_num_rows();
-    let num_columns = EDITOR.get_num_columns();
-    for y in 0..num_rows {
-        if y == num_rows / 3 {
-            let mut welcome_msg = format!("Kilo editor -- version {}", KILO_VERSION);
-            if welcome_msg.len() > num_columns {
-                welcome_msg = welcome_msg[..num_columns].to_string();
-            }
-            let mut padding = (num_columns - welcome_msg.len()) / 2;
-            if padding > 0 {
+    let editor = EDITOR.acquire_read_lock();
+
+    let editor_num_rows = editor.get_editor_num_rows();
+    let editor_num_columns = editor.get_editor_num_columns();
+
+    for y in 0..editor_num_rows {
+        if y >= editor.get_text_num_rows() {
+            if editor.get_text_num_rows() == 0 && y == editor_num_rows / 3 {
+                let mut welcome_msg = format!("Kilo editor -- version {}", KILO_VERSION);
+                if welcome_msg.len() > editor_num_columns {
+                    welcome_msg = welcome_msg[..editor_num_columns].to_string();
+                }
+                let mut padding = (editor_num_columns - welcome_msg.len()) / 2;
+                if padding > 0 {
+                    buffer.push("~");
+                    padding -= 1;
+                }
+
+                while padding > 0 {
+                    buffer.push(" ");
+                    padding -= 1;
+                }
+
+                buffer.push(&welcome_msg);
+            } else {
                 buffer.push("~");
-                padding -= 1;
             }
-
-            while (padding > 0) {
-                buffer.push(" ");
-                padding -= 1;
-            }
-
-            buffer.push(&welcome_msg);
         } else {
-            buffer.push("~");
+            let mut row: &str = &editor.rows[y];
+            let row_len = row.len();
+            if row_len > editor_num_columns {
+                row = &row[..editor_num_columns];
+            }
+            buffer.push(row);
         }
 
         buffer.push("\x1b[K");
-        if y < num_rows - 1 {
+        if y < editor_num_rows - 1 {
             buffer.push("\r\n");
         }
     }
@@ -243,6 +320,30 @@ fn editor_refresh_screen() {
     buffer.push("\x1b[?25h");
 
     buffer.write();
+}
+
+/*** File I/O ***/
+fn editor_open(filename: &str) {
+    let file_contents = match std::fs::read_to_string(filename) {
+        Ok(file) => file,
+        Err(_) => {
+            die("fopen");
+            return;
+        }
+    };
+
+    for line in file_contents.split('\n') {
+        let mut length = line.len();
+        while length > 0
+            && (line.as_bytes()[length - 1] == b'\n' || line.as_bytes()[length - 1] == b'\r')
+        {
+            length -= 1;
+        }
+
+        let line = &line[..length];
+        // println!("Append row: {} (len: {})", line, length);
+        EDITOR.append_row(line.to_string());
+    }
 }
 
 /*** Input ***/
@@ -326,8 +427,8 @@ fn editor_move_cursor(key: usize) {
         let cursor_x = cursor_x as isize + offset_x;
         let cursor_y = cursor_y as isize + offset_y;
 
-        let num_rows = EDITOR.get_num_rows();
-        let num_columns = EDITOR.get_num_columns();
+        let num_rows = EDITOR.get_editor_num_rows();
+        let num_columns = EDITOR.get_editor_num_columns();
 
         if cursor_x >= 0 && cursor_x < num_columns as isize {
             EDITOR.set_cursor_x(cursor_x as usize);
@@ -359,7 +460,7 @@ fn editor_process_keypress() {
         }
         ARROW_LEFT_KEY | ARROW_RIGHT_KEY | ARROW_UP_KEY | ARROW_DOWN_KEY => editor_move_cursor(key),
         PAGE_DOWN_KEY | PAGE_UP_KEY => {
-            let mut times = EDITOR.get_num_rows() as isize;
+            let mut times = EDITOR.get_editor_num_rows() as isize;
             while times > 0 {
                 editor_move_cursor(if key == PAGE_UP_KEY {
                     ARROW_UP_KEY
@@ -371,7 +472,7 @@ fn editor_process_keypress() {
         }
         HOME_KEY => EDITOR.set_cursor_x(0),
         END_KEY => {
-            let num_columns = EDITOR.get_num_columns();
+            let num_columns = EDITOR.get_editor_num_columns();
             EDITOR.set_cursor_x(num_columns - 1);
         }
         _ => {}
@@ -381,6 +482,11 @@ fn editor_process_keypress() {
 fn main() {
     enable_raw_mode();
     init_editor();
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        editor_open(&args[1]);
+    }
 
     loop {
         editor_refresh_screen();
