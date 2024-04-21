@@ -664,9 +664,11 @@ impl Editor {
                 } else {
                     return Some(buffer.buf);
                 }
-            } else if key == BACKSPACE_KEY || key == Editor::ctrl_char('h')  || key == DELETE_KEY {
+            } else if key == BACKSPACE_KEY || key == Editor::ctrl_char('h') || key == DELETE_KEY {
                 buffer.buf.pop();
-            } else if key < 127 && (key as u8).is_ascii_graphic() || (key as u8).is_ascii_whitespace() {
+            } else if key < 127 && (key as u8).is_ascii_graphic()
+                || (key as u8).is_ascii_whitespace()
+            {
                 buffer.buf.push(key as u8 as char);
             }
         }
